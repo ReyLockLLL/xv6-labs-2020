@@ -41,7 +41,7 @@ procinit(void)
        kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
        p->kstack = va;
   }
-   kvminithart();
+  kvminithart();
 }
 
 // Must be called with interrupts disabled,
@@ -124,20 +124,18 @@ found:
   // Add the global kernel pagetable to process p.
   p->kernel_pagetable = kpgtblalloc();
   if(p->kernel_pagetable == 0) {
-	freeproc(p);
-	release(&p->lock);
-	return 0;
+		freeproc(p);
+		release(&p->lock);
+		return 0;
   }
 
-  // Make each process's kernel page table has a mapping
-  // for that process's kernel stack.
-  char *pa = kalloc();
-  if (pa == 0)
-    panic("kalloc");
-  uint64 va = KSTACK((int) (p-proc));
-  kpgtblvmmap(p->kernel_pagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-  p->kstack = va;
-
+	// Copy kstack to process's kernel_pagetable.
+	
+	uint64 va = KSTACK((int) (p-proc));
+	kvmcopykern(p->kernel_pagetable, va, va+(uint64)PGSIZE);
+	//kpgtblvmmap(p->kernel_pagetable, va, kvmpa(va), PGSIZE, PTE_R|PTE_W);
+	
+	
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -158,13 +156,15 @@ freeproc(struct proc *p)
   p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
-  if (p->kstack) {
-	proc_freekstack(p->kernel_pagetable, p->kstack);
-	p->kstack = 0;
-  }
+	// No need to free kstack because we'll free it in kvmfree.
+ /* 
+	if (p->kstack) {
+		kvmunmap(p->kernel_pagetable, (uint64) KSTACK(p->kstack), 1);	
+		p->kstack = 0;
+  }*/
   if(p->kernel_pagetable) {
-    proc_freekpgtbl(p->kernel_pagetable);
-	p->kernel_pagetable = 0;
+    kvmfree(p->kernel_pagetable);
+		p->kernel_pagetable = 0;
   }
   p->pagetable = 0;
   p->sz = 0;
@@ -210,6 +210,23 @@ proc_pagetable(struct proc *p)
   return pagetable;
 }
 
+void
+proc_freekpt(pagetable_t pagetable)
+{
+	for(int i = 0; i < 512; i++){
+		pte_t pte = pagetable[i];
+		if((pte & PTE_V)){
+			pagetable[i] = 0;
+			if ((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+				uint64 child = PTE2PA(pte);
+				proc_freekpt((pagetable_t) child);
+			}
+		} else if(pte & PTE_V)
+				panic("proc free kpt: leaf");
+	}
+	kfree((void *)pagetable);
+}
+
 // Free a process's page table, and free the
 // physical memory it refers to.
 void
@@ -219,28 +236,6 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmfree(pagetable, sz);
 }
-
-void
-proc_freekstack(pagetable_t kpgtbl, uint64 kstack) {
-  uvmunmap(kpgtbl, kstack, 1, 1);
-}
-
-// Free a process's kernel page table.
-// Don't free the PA it refers to.
-void
-proc_freekpgtbl(pagetable_t kpgtbl) {
-  for (int i = 0; i < 512; i++) {
-	pte_t pte = kpgtbl[i];
-	if ((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0) {
-	  uint64 child = PTE2PA(pte);
-	  proc_freekpgtbl((pagetable_t) child);
-	  kpgtbl[i] = 0;
-	} else if (pte & PTE_V)
-	  kpgtbl[i] = 0;
-  }
-  kfree((void *) kpgtbl);
-}
-
 
 // a user program that calls exec("/init")
 // od -t xC initcode
@@ -294,19 +289,25 @@ growproc(int n)
   sz = p->sz;
   if(n > 0){
   	if (sz + n > PLIC)
-	  return -1;
+	  	return -1;
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+		/*
 	if(kvmcopy(p->pagetable, p->kernel_pagetable, p->sz, sz) != 0) 
-	  return -1;
+	  return -1;*/
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
-	if (sz != p->sz)
-	  uvmunmap(p->kernel_pagetable, PGROUNDUP(sz), (PGROUNDUP(p->sz) - PGROUNDUP(sz)) / PGSIZE, 1);
-  }
+		/*
+		if (sz != p->sz)
+	  	uvmunmap(p->kernel_pagetable, PGROUNDUP(sz), (PGROUNDUP(p->sz) - PGROUNDUP(sz)) / PGSIZE, 1);
+  	*/
+	}
+	kvmmapuser(p->pid, p->kernel_pagetable, p->pagetable, sz, p->sz);
+	/*
   w_satp(MAKE_SATP(p->kernel_pagetable));
   sfence_vma();
+	*/
   p->sz = sz;
   return 0;
 }
@@ -333,12 +334,16 @@ fork(void)
   }
   np->sz = p->sz;
   
+	// START LAB 3_3
+	/*	
   // Copy user's kernel pagetable from parent to child.
   if (kvmcopy(p->kernel_pagetable, np->kernel_pagetable, 0, np->sz) != 0) {
-	freeproc(np);
-	release(&np->lock);
-	return -1;
+		freeproc(np);
+		release(&np->lock);
+		return -1;
   } 
+	// END LAB 3_3
+	*/
   
   np->parent = p;
 
@@ -359,6 +364,8 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
+
+	kvmmapuser(np->pid, np->kernel_pagetable, np->pagetable, np->sz, 0);
 
   release(&np->lock);
 
@@ -536,8 +543,10 @@ scheduler(void)
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
-		w_satp(MAKE_SATP(p->kernel_pagetable));
-		sfence_vma();
+				
+				w_satp(MAKE_SATP(p->kernel_pagetable));
+				sfence_vma();
+				
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
@@ -545,7 +554,7 @@ scheduler(void)
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
- 		kvminithart();
+ 				kvminithart();
         found = 1;
       }
       release(&p->lock);
@@ -553,7 +562,7 @@ scheduler(void)
 #if !defined (LAB_FS)
     if(found == 0) {
       intr_on();
-	  kvminithart();
+	  	kvminithart();
       asm volatile("wfi");
     }
 #else

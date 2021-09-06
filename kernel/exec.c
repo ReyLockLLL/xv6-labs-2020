@@ -116,16 +116,17 @@ exec(char *path, char **argv)
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
-  
+  /*
   if (kvmcopy(pagetable, p->kernel_pagetable, 0, sz) != 0)
     goto bad;
 
   w_satp(MAKE_SATP(p->kernel_pagetable));
   sfence_vma();
-  
+  */
     
   if (p->pid == 1)
     vmprint(p->pagetable);
+	kvmmapuser(p->pid, p->kernel_pagetable, p->pagetable, p->sz, 0);
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
